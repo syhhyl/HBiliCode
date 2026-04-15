@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
 
 
 USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0.0.0 Safari/537.36"
 )
@@ -32,18 +32,7 @@ APP_SEC = "af125a0d5279fd576c1b4418a3e8276d"
 DEFAULT_AREA_ID = "235"
 
 
-def get_config_dir() -> Path:
-    override = os.environ.get("HBILICODE_CONFIG_HOME")
-    path = (
-        Path(override).expanduser()
-        if override
-        else Path.home() / "Library" / "Application Support" / "HBiliCode"
-    )
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-SESSION_FILE = get_config_dir() / "session.json"
+SESSION_FILE = Path("session.json")
 
 
 def ensure_private_permissions(path: Path) -> None:
@@ -59,7 +48,8 @@ def load_session() -> dict:
     try:
         ensure_private_permissions(SESSION_FILE)
         return json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        print(f"读取会话文件失败，将重新登录: {exc}", file=sys.stderr)
         return {}
 
 
@@ -93,29 +83,15 @@ def build_cookie_header(cookies: dict[str, str] | None) -> str | None:
     return "; ".join(f"{key}={value}" for key, value in cookies.items())
 
 
-def http_json(method: str, url: str, *, params=None, data=None, cookies=None) -> dict:
-    if params:
-        url = f"{url}?{urllib.parse.urlencode(params)}"
-
-    request_headers = dict(HEADERS)
-    cookie_header = build_cookie_header(cookies)
-    if cookie_header:
-        request_headers["Cookie"] = cookie_header
-
-    body = None
-    if data is not None:
-        body = urllib.parse.urlencode(data).encode()
-
-    request = urllib.request.Request(
-        url, headers=request_headers, data=body, method=method
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def http_json_with_cookies(
-    method: str, url: str, *, params=None, data=None, cookies=None
-) -> tuple[dict, dict[str, str]]:
+def http_json(
+    method: str,
+    url: str,
+    *,
+    params=None,
+    data=None,
+    cookies=None,
+    with_cookies: bool = False,
+) -> dict | tuple[dict, dict[str, str]]:
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
 
@@ -133,6 +109,8 @@ def http_json_with_cookies(
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         payload = json.loads(response.read().decode("utf-8"))
+        if not with_cookies:
+            return payload
         cookie_jar = SimpleCookie()
         for raw_header in response.headers.get_all("Set-Cookie", []):
             cookie_jar.load(raw_header)
@@ -171,10 +149,11 @@ def get_login_qr() -> dict:
 
 
 def poll_login_status(qrcode_key: str) -> tuple[dict, dict[str, str]]:
-    return http_json_with_cookies(
+    return http_json(
         "GET",
         "https://passport.bilibili.com/x/passport-login/web/qrcode/poll",
         params={"qrcode_key": qrcode_key},
+        with_cookies=True,
     )
 
 
@@ -240,7 +219,8 @@ def session_is_valid(session: dict) -> bool:
         payload = http_json(
             "GET", "https://api.bilibili.com/x/web-interface/nav", cookies=cookies
         )
-    except Exception:
+    except Exception as exc:
+        print(f"登录态校验失败，将重新登录: {exc}", file=sys.stderr)
         return False
     return payload.get("code") == 0 and bool(payload.get("data", {}).get("isLogin"))
 
@@ -260,7 +240,7 @@ def qr_login() -> dict:
         except Exception as exc:
             poll_failures += 1
             if poll_failures == 1 or poll_failures % 5 == 0:
-                print(f"轮询失败，正在重试: {exc}", flush=True)
+                print(f"登录状态轮询失败，2 秒后重试: {exc}", flush=True)
             time.sleep(2)
             continue
 
@@ -349,20 +329,21 @@ def start_live(session: dict) -> dict:
 
     candidate_area_ids: list[str] = []
 
-    def add_area_id(value: object) -> None:
+    for value in (session.get("area_id"), DEFAULT_AREA_ID):
         if value is None:
-            return
+            continue
         area_id = str(value).strip()
         if area_id and area_id not in candidate_area_ids:
             candidate_area_ids.append(area_id)
 
-    add_area_id(session.get("area_id"))
-    add_area_id(DEFAULT_AREA_ID)
-
     try:
         room_info = fetch_room_info(session["room_id"], session["cookies"])
-        add_area_id(room_info.get("area_v2_id"))
-        add_area_id(room_info.get("area_id"))
+        for value in (room_info.get("area_v2_id"), room_info.get("area_id")):
+            if value is None:
+                continue
+            area_id = str(value).strip()
+            if area_id and area_id not in candidate_area_ids:
+                candidate_area_ids.append(area_id)
     except Exception:
         pass
 
@@ -430,33 +411,25 @@ def extract_streams(data: dict, room_id: str) -> dict:
 
 def print_streams(streams: dict) -> None:
     print("开播成功")
+    print(f"房间号: {streams['room_id']}")
     print()
-    print("房间号:")
-    print(streams["room_id"])
+    print("RTMP-1")
+    print(f"地址: {streams['rtmp1']['addr']}")
+    print(f"推流码: {streams['rtmp1']['code']}")
     print()
-    print("RTMP-1 地址:")
-    print(streams["rtmp1"]["addr"])
+    print("RTMP-2")
+    print(f"地址: {streams['rtmp2']['addr']}")
+    print(f"推流码: {streams['rtmp2']['code']}")
     print()
-    print("RTMP-1 推流码:")
-    print(streams["rtmp1"]["code"])
-    print()
-    print("RTMP-2 地址:")
-    print(streams["rtmp2"]["addr"])
-    print()
-    print("RTMP-2 推流码:")
-    print(streams["rtmp2"]["code"])
-    print()
-    print("SRT 地址:")
-    print(streams["srt"]["addr"])
-    print()
-    print("SRT 推流码:")
-    print(streams["srt"]["code"])
+    print("SRT")
+    print(f"地址: {streams['srt']['addr']}")
+    print(f"推流码: {streams['srt']['code']}")
 
 
 def main() -> int:
     if len(sys.argv) > 1:
         print(
-            "这个脚本不接受参数，直接运行 `python mac_stream_cli.py` 即可",
+            "这个脚本不接受参数，直接运行 `python stream.py` 即可",
             file=sys.stderr,
         )
         return 2
@@ -475,7 +448,7 @@ def main() -> int:
         print("已取消", file=sys.stderr)
         return 130
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
+        print(f"执行失败: {exc}", file=sys.stderr)
         return 1
 
 

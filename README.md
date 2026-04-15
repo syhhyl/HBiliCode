@@ -32,16 +32,14 @@ pip install -r requirements.txt
 直接运行：
 
 ```bash
-python3 mac_stream_cli.py
+python3 stream.py
 ```
 
 ## session 文件
 
 脚本会把登录态保存到：
 
-- `~/Library/Application Support/HBiliCode/session.json`
-
-也可以通过环境变量 `HBILICODE_CONFIG_HOME` 改掉目录。
+- 当前目录下的 `session.json`
 
 ## 重要说明
 
